@@ -8,9 +8,9 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_curve, auc
 
 
-# --------------------------------
+# =================================
 # FRP Feature Functions
-# --------------------------------
+# =================================
 
 def size_score(length):
 
@@ -42,9 +42,9 @@ def repeat_density(seq):
     return count / n
 
 
-# --------------------------------
-# FRP Analysis (Immune Alarm Core)
-# --------------------------------
+# =================================
+# FRP Core Analysis
+# =================================
 
 def frp_analysis(sequence, dloop=(16024, 576)):
 
@@ -93,7 +93,6 @@ def frp_analysis(sequence, dloop=(16024, 576)):
                         is_dloop = True
 
 
-            # Raw Scores
             raw_fps = (
                 0.3 * at +
                 0.3 * instab +
@@ -108,9 +107,6 @@ def frp_analysis(sequence, dloop=(16024, 576)):
 
 
             rows.append([
-                s,
-                (s + L) % n,
-                L,
                 raw_fps,
                 raw_ivs
             ])
@@ -118,17 +114,13 @@ def frp_analysis(sequence, dloop=(16024, 576)):
 
     df = pd.DataFrame(
         rows,
-        columns=[
-            "start", "end", "length",
-            "raw_fps", "raw_ivs"
-        ]
+        columns=["raw_fps", "raw_ivs"]
     )
 
 
     eps = 1e-9
 
 
-    # Normalize
     df["FPS"] = (df.raw_fps - df.raw_fps.min()) / \
                 (df.raw_fps.max() - df.raw_fps.min() + eps)
 
@@ -136,7 +128,6 @@ def frp_analysis(sequence, dloop=(16024, 576)):
                 (df.raw_ivs.max() - df.raw_ivs.min() + eps)
 
 
-    # Final Alarm Score
     df["Alarm"] = df["FPS"] + df["IVS"]
 
     df["Alarm_norm"] = (df.Alarm - df.Alarm.min()) / \
@@ -146,72 +137,30 @@ def frp_analysis(sequence, dloop=(16024, 576)):
     return df
 
 
-# --------------------------------
-# Alarm Landscape Plot
-# --------------------------------
+# =================================
+# Build Patient Feature Vector
+# =================================
 
-def plot_alarm(df, n, dloop):
+def patient_profile(sequence):
 
-    base = np.zeros(n)
+    df = frp_analysis(sequence)
 
+    features = [
+        df["FPS"].mean(),
+        df["IVS"].mean(),
+        df["Alarm_norm"].mean(),
+        df["Alarm_norm"].max(),
+        df["Alarm_norm"].std()
+    ]
 
-    for _, r in df.iterrows():
-
-        s = int(r.start)
-        e = int(r.end)
-
-        score = r.Alarm_norm
-
-
-        if s < e:
-
-            base[s:e] = np.maximum(base[s:e], score)
-
-        else:
-
-            base[s:] = np.maximum(base[s:], score)
-            base[:e] = np.maximum(base[:e], score)
+    return features
 
 
-    fig, ax = plt.subplots(figsize=(14, 5))
-
-
-    ax.plot(base, color="crimson")
-
-    ax.fill_between(range(n), base, color="crimson", alpha=0.15)
-
-
-    ds, de = dloop
-
-
-    if ds > de:
-
-        ax.axvspan(ds, n, color="gray", alpha=0.2)
-        ax.axvspan(0, de, color="gray", alpha=0.2)
-
-    else:
-
-        ax.axvspan(ds, de, color="gray", alpha=0.2)
-
-
-    ax.set_title("mtDNA Immune Alarm Landscape (FRP)")
-
-    ax.set_xlabel("Position (bp)")
-
-    ax.set_ylabel("Normalized Risk")
-
-
-    return fig
-
-
-# --------------------------------
+# =================================
 # ML Training
-# --------------------------------
+# =================================
 
-def train_model(df, y):
-
-    X = df[["FPS", "IVS", "Alarm_norm"]].values
-
+def train_model(X, y):
 
     Xtr, Xte, ytr, yte = train_test_split(
         X, y,
@@ -225,10 +174,10 @@ def train_model(df, y):
     model.fit(Xtr, ytr)
 
 
-    prob = model.predict_proba(Xte)[:, 1]
+    probs = model.predict_proba(Xte)[:, 1]
 
 
-    fpr, tpr, _ = roc_curve(yte, prob)
+    fpr, tpr, _ = roc_curve(yte, probs)
 
     auc_val = auc(fpr, tpr)
 
@@ -236,100 +185,160 @@ def train_model(df, y):
     return model, fpr, tpr, auc_val
 
 
-# --------------------------------
+# =================================
 # Streamlit UI
-# --------------------------------
+# =================================
 
-st.set_page_config("FRP Immune Alarm Tool", layout="wide")
+st.set_page_config("FRP Clinical Analyzer", layout="wide")
 
-st.title("🧬 mtDNA FRP Immune Alarm Analyzer")
+st.title("🧬 FRP mtDNA Disease Prediction System")
 
 
-fasta = st.file_uploader(
-    "Upload FASTA",
-    type=["fa", "fasta", "txt"]
+st.markdown("Upload patient FASTA files + labels CSV")
+
+
+fasta_files = st.file_uploader(
+    "Upload Patient FASTA Files",
+    type=["fa", "fasta", "txt"],
+    accept_multiple_files=True
 )
 
 
-run = st.button("Run FRP Analysis")
+label_file = st.file_uploader(
+    "Upload Labels CSV (sample,label)",
+    type=["csv"]
+)
 
 
+run_btn = st.button("Run Clinical Analysis")
 
-# --------------------------------
+
+# =================================
 # Execution
-# --------------------------------
+# =================================
 
-if run:
+if run_btn:
 
-    if not fasta:
+    if not fasta_files or not label_file:
 
-        st.error("Upload FASTA file")
+        st.error("Upload FASTA files and label CSV")
 
     else:
 
-        raw = fasta.read().decode()
+        # Read FASTA files
+        sequences = {}
 
-        seq = "".join([
-            l.strip()
-            for l in raw.splitlines()
-            if not l.startswith(">")
-        ]).upper()
+        for file in fasta_files:
 
+            raw = file.read().decode()
 
-        # FRP
-        with st.spinner("Running FRP model..."):
+            seq = "".join([
+                l.strip()
+                for l in raw.splitlines()
+                if not l.startswith(">")
+            ]).upper()
 
-            df = frp_analysis(seq)
+            name = file.name.split(".")[0]
 
-
-        st.success("FRP Analysis Complete")
-
-
-        # Alarm Plot
-        st.subheader("Immune Alarm Landscape")
-
-        fig = plot_alarm(df, len(seq), (16024, 576))
-
-        st.pyplot(fig)
+            sequences[name] = seq
 
 
-        # Auto labels
-        y = np.random.randint(0, 2, len(df))
+        # Read labels
+        labels = pd.read_csv(label_file)
+
+        if not {"sample", "label"}.issubset(labels.columns):
+
+            st.error("CSV must have: sample,label")
+
+        else:
+
+            X = []
+            y = []
 
 
-        # ML
-        with st.spinner("Training ML classifier..."):
+            with st.spinner("Running FRP on patients..."):
 
-            model, fpr, tpr, auc_val = train_model(df, y)
+                for _, row in labels.iterrows():
 
-
-        col1, col2 = st.columns(2)
-
-        col1.metric("Fragments", len(df))
-
-        col2.metric("AUC", f"{auc_val:.3f}")
+                    name = row["sample"]
+                    label = row["label"]
 
 
-        # ROC
-        st.subheader("ROC Curve")
+                    if name not in sequences:
 
-        fig2, ax2 = plt.subplots()
-
-        ax2.plot(fpr, tpr, label=f"AUC = {auc_val:.3f}")
-
-        ax2.plot([0, 1], [0, 1], "--")
-
-        ax2.legend()
-
-        st.pyplot(fig2)
+                        st.warning(f"Missing FASTA: {name}")
+                        continue
 
 
-        # Table
-        st.subheader("Top Alarm Fragments")
+                    seq = sequences[name]
 
-        st.dataframe(
-            df.sort_values("Alarm_norm", ascending=False).head(30)
-        )
+                    feats = patient_profile(seq)
+
+                    X.append(feats)
+                    y.append(label)
 
 
-st.caption("FRP Immune Alarm Model | Research Prototype")
+            X = np.array(X)
+            y = np.array(y)
+
+
+            if len(X) < 5:
+
+                st.error("Need at least 5 samples")
+
+            else:
+
+                # Train ML
+                with st.spinner("Training ML model..."):
+
+                    model, fpr, tpr, auc_val = train_model(X, y)
+
+
+                st.success("Clinical Analysis Complete")
+
+
+                # Metrics
+                col1, col2 = st.columns(2)
+
+                col1.metric("Patients", len(X))
+                col2.metric("AUC", f"{auc_val:.3f}")
+
+
+                # ROC
+                st.subheader("ROC Curve")
+
+                fig, ax = plt.subplots()
+
+                ax.plot(fpr, tpr, label=f"AUC = {auc_val:.3f}")
+                ax.plot([0, 1], [0, 1], "--")
+
+                ax.set_xlabel("False Positive Rate")
+                ax.set_ylabel("True Positive Rate")
+
+                ax.set_title("Disease Prediction ROC")
+
+                ax.legend()
+
+                st.pyplot(fig)
+
+
+                # Feature Table
+                st.subheader("Patient-Level Features")
+
+                feat_df = pd.DataFrame(
+                    X,
+                    columns=[
+                        "FPS_mean",
+                        "IVS_mean",
+                        "Alarm_mean",
+                        "Alarm_max",
+                        "Alarm_std"
+                    ]
+                )
+
+                feat_df["Label"] = y
+
+                st.dataframe(feat_df)
+
+
+st.caption("FRP Clinical Model | Research Prototype")
