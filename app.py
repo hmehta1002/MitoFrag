@@ -9,7 +9,7 @@ from sklearn.metrics import roc_curve, auc
 
 
 # --------------------------------
-# Feature Functions
+# FRP Feature Functions
 # --------------------------------
 
 def size_score(length):
@@ -31,7 +31,6 @@ def repeat_density(seq):
     while i < n:
 
         j = i
-
         while j < n and seq[j] == seq[i]:
             j += 1
 
@@ -43,43 +42,166 @@ def repeat_density(seq):
     return count / n
 
 
-def extract_features(seq, start, length):
-
-    frag = (seq + seq)[start:start + length]
-
-    at = (frag.count("A") + frag.count("T")) / length
-    gc = (frag.count("G") + frag.count("C")) / length
-
-    cpg = frag.count("CG") / length
-
-    rep = repeat_density(frag)
-
-    size = size_score(length)
-
-    return [at, gc, cpg, rep, size]
-
-
 # --------------------------------
-# Fragment Generator
+# FRP Analysis (Immune Alarm Core)
 # --------------------------------
 
-def generate_fragments(seq):
+def frp_analysis(sequence, dloop=(16024, 576)):
+
+    n = len(sequence)
+
+    ext = sequence + sequence
 
     rows = []
 
-    n = len(seq)
+    ds, de = dloop
+
 
     for L in range(60, 260, 20):
 
         for s in range(0, n, 15):
 
-            feat = extract_features(seq, s, L)
+            frag = ext[s:s + L]
 
-            rows.append(feat)
 
-    cols = ["AT", "GC", "CpG", "Repeat", "Size"]
+            at = (frag.count("A") + frag.count("T")) / L
+            gc = (frag.count("G") + frag.count("C")) / L
 
-    return pd.DataFrame(rows, columns=cols)
+            instab = 1 - gc
+
+            rep = repeat_density(frag)
+
+            cpg = frag.count("CG") / L
+
+            size = size_score(L)
+
+
+            # D-loop overlap
+            is_dloop = False
+
+            for p in range(s, s + L):
+
+                pos = p % n
+
+                if ds < de:
+
+                    if ds <= pos <= de:
+                        is_dloop = True
+                else:
+
+                    if pos >= ds or pos <= de:
+                        is_dloop = True
+
+
+            # Raw Scores
+            raw_fps = (
+                0.3 * at +
+                0.3 * instab +
+                0.2 * rep +
+                0.2 * int(is_dloop)
+            )
+
+            raw_ivs = (
+                0.6 * cpg +
+                0.4 * size
+            )
+
+
+            rows.append([
+                s,
+                (s + L) % n,
+                L,
+                raw_fps,
+                raw_ivs
+            ])
+
+
+    df = pd.DataFrame(
+        rows,
+        columns=[
+            "start", "end", "length",
+            "raw_fps", "raw_ivs"
+        ]
+    )
+
+
+    eps = 1e-9
+
+
+    # Normalize
+    df["FPS"] = (df.raw_fps - df.raw_fps.min()) / \
+                (df.raw_fps.max() - df.raw_fps.min() + eps)
+
+    df["IVS"] = (df.raw_ivs - df.raw_ivs.min()) / \
+                (df.raw_ivs.max() - df.raw_ivs.min() + eps)
+
+
+    # Final Alarm Score
+    df["Alarm"] = df["FPS"] + df["IVS"]
+
+    df["Alarm_norm"] = (df.Alarm - df.Alarm.min()) / \
+                       (df.Alarm.max() - df.Alarm.min() + eps)
+
+
+    return df
+
+
+# --------------------------------
+# Alarm Landscape Plot
+# --------------------------------
+
+def plot_alarm(df, n, dloop):
+
+    base = np.zeros(n)
+
+
+    for _, r in df.iterrows():
+
+        s = int(r.start)
+        e = int(r.end)
+
+        score = r.Alarm_norm
+
+
+        if s < e:
+
+            base[s:e] = np.maximum(base[s:e], score)
+
+        else:
+
+            base[s:] = np.maximum(base[s:], score)
+            base[:e] = np.maximum(base[:e], score)
+
+
+    fig, ax = plt.subplots(figsize=(14, 5))
+
+
+    ax.plot(base, color="crimson")
+
+    ax.fill_between(range(n), base, color="crimson", alpha=0.15)
+
+
+    ds, de = dloop
+
+
+    if ds > de:
+
+        ax.axvspan(ds, n, color="gray", alpha=0.2)
+        ax.axvspan(0, de, color="gray", alpha=0.2)
+
+    else:
+
+        ax.axvspan(ds, de, color="gray", alpha=0.2)
+
+
+    ax.set_title("mtDNA Immune Alarm Landscape (FRP)")
+
+    ax.set_xlabel("Position (bp)")
+
+    ax.set_ylabel("Normalized Risk")
+
+
+    return fig
 
 
 # --------------------------------
@@ -88,70 +210,64 @@ def generate_fragments(seq):
 
 def train_model(df, y):
 
-    X = df.values
+    X = df[["FPS", "IVS", "Alarm_norm"]].values
 
-    X_train, X_test, y_train, y_test = train_test_split(
+
+    Xtr, Xte, ytr, yte = train_test_split(
         X, y,
         test_size=0.25,
         random_state=42
     )
 
+
     model = LogisticRegression(max_iter=3000)
 
-    model.fit(X_train, y_train)
+    model.fit(Xtr, ytr)
 
-    probs = model.predict_proba(X_test)[:, 1]
 
-    fpr, tpr, _ = roc_curve(y_test, probs)
+    prob = model.predict_proba(Xte)[:, 1]
 
-    auc_score = auc(fpr, tpr)
 
-    return model, fpr, tpr, auc_score
+    fpr, tpr, _ = roc_curve(yte, prob)
+
+    auc_val = auc(fpr, tpr)
+
+
+    return model, fpr, tpr, auc_val
 
 
 # --------------------------------
 # Streamlit UI
 # --------------------------------
 
-st.set_page_config(
-    page_title="FRP-ML Analyzer",
-    layout="wide"
-)
+st.set_page_config("FRP Immune Alarm Tool", layout="wide")
 
-st.title("🧬 mtDNA FRP-ML Analyzer")
-
-st.write("Upload mtDNA sequence and label file (optional)")
+st.title("🧬 mtDNA FRP Immune Alarm Analyzer")
 
 
-fasta_file = st.file_uploader(
-    "Upload FASTA File",
+fasta = st.file_uploader(
+    "Upload FASTA",
     type=["fa", "fasta", "txt"]
 )
 
 
-label_file = st.file_uploader(
-    "Upload Label CSV (column: label)",
-    type=["csv"]
-)
+run = st.button("Run FRP Analysis")
 
-
-run_btn = st.button("Run Analysis")
 
 
 # --------------------------------
 # Execution
 # --------------------------------
 
-if run_btn:
+if run:
 
-    if not fasta_file:
+    if not fasta:
 
-        st.error("Please upload a FASTA file")
+        st.error("Upload FASTA file")
 
     else:
 
-        # Read FASTA
-        raw = fasta_file.read().decode()
+        raw = fasta.read().decode()
 
         seq = "".join([
             l.strip()
@@ -160,96 +276,60 @@ if run_btn:
         ]).upper()
 
 
-        # Generate fragments
-        df = generate_fragments(seq)
+        # FRP
+        with st.spinner("Running FRP model..."):
+
+            df = frp_analysis(seq)
 
 
-        # Read labels if provided
-        if label_file:
-
-            lab = pd.read_csv(label_file)
-
-            if "label" in lab.columns:
-
-                y = lab["label"].values
-
-            else:
-
-                st.warning("No 'label' column. Using random labels.")
-
-                y = np.random.randint(0, 2, len(df))
-
-        else:
-
-            st.warning("No label file. Using random labels.")
-
-            y = np.random.randint(0, 2, len(df))
+        st.success("FRP Analysis Complete")
 
 
-        # Fix size mismatch
-        if len(y) != len(df):
+        # Alarm Plot
+        st.subheader("Immune Alarm Landscape")
 
-            st.warning("Label count mismatch. Auto-adjusting.")
-
-            y = np.random.randint(0, 2, len(df))
-
-
-        # Train model
-        with st.spinner("Training ML model..."):
-
-            model, fpr, tpr, auc_val = train_model(df, y)
-
-
-        st.success("Analysis Complete")
-
-
-        # Metrics
-        col1, col2 = st.columns(2)
-
-        col1.metric("Fragments", len(df))
-        col2.metric("AUC Score", f"{auc_val:.3f}")
-
-
-        # ROC Plot
-        st.subheader("ROC Curve")
-
-        fig, ax = plt.subplots()
-
-        ax.plot(fpr, tpr, label=f"AUC = {auc_val:.3f}")
-
-        ax.plot([0, 1], [0, 1], "--")
-
-        ax.set_xlabel("False Positive Rate")
-        ax.set_ylabel("True Positive Rate")
-
-        ax.set_title("ROC Curve")
-
-        ax.legend()
+        fig = plot_alarm(df, len(seq), (16024, 576))
 
         st.pyplot(fig)
 
 
-        # Feature Weights
-        st.subheader("Feature Importance")
-
-        weights = pd.DataFrame({
-            "Feature": df.columns,
-            "Weight": model.coef_[0]
-        })
-
-        st.dataframe(weights)
+        # Auto labels
+        y = np.random.randint(0, 2, len(df))
 
 
-        # Download
-        csv = weights.to_csv(index=False).encode()
+        # ML
+        with st.spinner("Training ML classifier..."):
 
-        st.download_button(
-            "Download Model Weights",
-            csv,
-            "model_weights.csv",
-            "text/csv"
+            model, fpr, tpr, auc_val = train_model(df, y)
+
+
+        col1, col2 = st.columns(2)
+
+        col1.metric("Fragments", len(df))
+
+        col2.metric("AUC", f"{auc_val:.3f}")
+
+
+        # ROC
+        st.subheader("ROC Curve")
+
+        fig2, ax2 = plt.subplots()
+
+        ax2.plot(fpr, tpr, label=f"AUC = {auc_val:.3f}")
+
+        ax2.plot([0, 1], [0, 1], "--")
+
+        ax2.legend()
+
+        st.pyplot(fig2)
+
+
+        # Table
+        st.subheader("Top Alarm Fragments")
+
+        st.dataframe(
+            df.sort_values("Alarm_norm", ascending=False).head(30)
         )
 
 
-st.markdown("---")
-st.caption("FRP-ML Prototype | Himani Project")
+st.caption("FRP Immune Alarm Model | Research Prototype")
